@@ -1,0 +1,243 @@
+{
+  "name": "P12 - AI Output Reviewer / Approval Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "approval-action",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "12a01c11-58d8-45d6-804c-bfeeec389d57",
+      "name": "Approval Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [-656, 144],
+      "webhookId": "YOUR_WEBHOOK_ID"
+    },
+
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "AI_Content_Review_Audit"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Reviews"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "Review ID",
+              "lookupValue": "={{ $('Approval Webhook').first().json.query.review_id }}"
+            }
+          ]
+        },
+        "options": {
+          "returnAllMatches": "returnFirstMatch"
+        }
+      },
+      "id": "7b6628d9-9e75-4d40-8d73-5cb034587a0f",
+      "name": "Lookup Review Record",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [-448, 144],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GSHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $('Approval Webhook').first().json.query.action }}",
+              "value2": "approve"
+            }
+          ]
+        }
+      },
+      "id": "3a1ae751-a2fe-4736-b771-4028f5352823",
+      "name": "Approve or Reject?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [-224, 144]
+    },
+
+    {
+      "parameters": {
+        "sendTo": "={{ $json['Destination'] }}",
+        "subject": "={{ '[Approved ✅] ' + ($json['Content Type'] || 'Draft') }}",
+        "emailType": "text",
+        "message": "=Your AI content has been approved by a human reviewer.\n\nReview ID:\n{{ $json['Review ID'] }}\n\nContent Type:\n{{ $json['Content Type'] }}\n\nRule Score:\n{{ $json['Rule Score'] }}\n\nQuality Score:\n{{ $json['Quality Score'] }}\n\nFinal Score:\n{{ $json['Final Score'] }}\n\nDecision:\nAPPROVED\n\nThis is an automated message.",
+        "options": {}
+      },
+      "id": "b26058dc-e930-41c3-9db8-198d03a12a5f",
+      "name": "Gmail Send Approved Draft",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+
+    {
+      "parameters": {
+        "sendTo": "={{ $json['Requester'] }}",
+        "subject": "={{ '❌ Draft Rejected - ' + $json['Review ID'] }}",
+        "emailType": "text",
+        "message": "=Hi,\n\nYour AI-generated draft has been reviewed and rejected by a human reviewer.\n\nReview ID:\n{{ $json['Review ID'] }}\n\nContent Type:\n{{ $json['Content Type'] }}\n\nRule Score:\n{{ $json['Rule Score'] }}\n\nQuality Score:\n{{ $json['Quality Score'] }}\n\nFinal Score:\n{{ $json['Final Score'] }}\n\nDecision:\nREJECTED\n\nPlease revise and resubmit.\n\nThis is an automated message.",
+        "options": {}
+      },
+      "id": "53d580b7-1ff7-4880-a56f-1815d141ceb1",
+      "name": "Gmail Notify Rejection",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [0, 288],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "AI_Content_Review_Audit"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Reviews"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Review ID": "={{ $('Approval Webhook').first().json.query.review_id }}",
+            "Decision":  "=APPROVED"
+          },
+          "matchingColumns": ["Review ID"],
+          "schema": [
+            { "id": "Review ID",    "displayName": "Review ID",    "required": false, "defaultMatch": true,  "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Content Type", "displayName": "Content Type", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Rule Score",   "displayName": "Rule Score",   "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Quality Score","displayName": "Quality Score","required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Final Score",  "displayName": "Final Score",  "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Decision",     "displayName": "Decision",     "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Requester",    "displayName": "Requester",    "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Destination",  "displayName": "Destination",  "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "fedfd0c6-1e71-40f9-92f4-ed35387f3823",
+      "name": "Update Log Approved",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [224, 0],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GSHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "AI_Content_Review_Audit"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Reviews"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Review ID": "={{ $('Approval Webhook').first().json.query.review_id }}",
+            "Decision":  "=REJECTED"
+          },
+          "matchingColumns": ["Review ID"],
+          "schema": [
+            { "id": "Review ID",    "displayName": "Review ID",    "required": false, "defaultMatch": true,  "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Content Type", "displayName": "Content Type", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Rule Score",   "displayName": "Rule Score",   "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Quality Score","displayName": "Quality Score","required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Final Score",  "displayName": "Final Score",  "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Decision",     "displayName": "Decision",     "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Requester",    "displayName": "Requester",    "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Destination",  "displayName": "Destination",  "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "1bf8cefd-2ab5-4c74-b362-8fe31381b8bf",
+      "name": "Update Log Rejected",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [224, 288],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GSHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+
+  "connections": {
+    "Approval Webhook": {
+      "main": [[{ "node": "Lookup Review Record", "type": "main", "index": 0 }]]
+    },
+    "Lookup Review Record": {
+      "main": [[{ "node": "Approve or Reject?", "type": "main", "index": 0 }]]
+    },
+    "Approve or Reject?": {
+      "main": [
+        [{ "node": "Gmail Send Approved Draft", "type": "main", "index": 0 }],
+        [{ "node": "Gmail Notify Rejection",    "type": "main", "index": 0 }]
+      ]
+    },
+    "Gmail Send Approved Draft": {
+      "main": [[{ "node": "Update Log Approved", "type": "main", "index": 0 }]]
+    },
+    "Gmail Notify Rejection": {
+      "main": [[{ "node": "Update Log Rejected", "type": "main", "index": 0 }]]
+    }
+  },
+
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
