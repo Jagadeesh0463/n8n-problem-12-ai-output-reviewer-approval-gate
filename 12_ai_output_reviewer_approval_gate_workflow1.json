@@ -1,0 +1,331 @@
+{
+  "name": "P12 - AI Output Reviewer / Approval Gate",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai-review",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "783e9208-d915-44df-b277-2a6787d46553",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [-1840, 80],
+      "webhookId": "YOUR_WEBHOOK_ID"
+    },
+
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "review_id",
+              "value": "={{ 'rev_' + $now.toFormat('yyyyMMddHHmmss') }}"
+            },
+            {
+              "name": "received_at",
+              "value": "={{ $now.toISO() }}"
+            },
+            {
+              "name": "content",
+              "value": "={{ $json.body.content }}"
+            },
+            {
+              "name": "content_type",
+              "value": "={{ $json.body.content_type || 'email' }}"
+            },
+            {
+              "name": "rules_profile",
+              "value": "={{ $json.body.rules_profile || 'support' }}"
+            },
+            {
+              "name": "destination",
+              "value": "={{ $json.body.destination }}"
+            },
+            {
+              "name": "requester_email",
+              "value": "={{ $json.body.requester_email }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0526ca2e-968d-4196-82d9-b376af3158d0",
+      "name": "Prepare Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [-1632, 80]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// N3 - Critical Rule Checker (Phase 1)\n// Deterministic checks — zero LLM cost\n\nconst item = $input.first().json;\nconst content = (item.content || '').trim();\nconst contentType = (item.content_type || 'email').toLowerCase();\n\nconst violations = [];\nconst passed = [];\n\nconst words = content.split(/\\s+/).filter(Boolean);\nconst wordCount = words.length;\n\n// Check 1 — Word Count\nif (wordCount >= 10) {\n  passed.push('word_count_ok');\n} else {\n  violations.push('content_too_short');\n}\n\n// Check 2 — Greeting\nif (/^(hello|hi|dear)/i.test(content)) {\n  passed.push('greeting_present');\n} else {\n  violations.push('missing_greeting');\n}\n\n// Check 3 — Prohibited Words\nconst prohibited = [\n  'free money',\n  'guaranteed',\n  'urgent',\n  'click here'\n];\n\nconst found = prohibited.filter(word =>\n  content.toLowerCase().includes(word)\n);\n\nif (found.length === 0) {\n  passed.push('no_prohibited_words');\n} else {\n  violations.push('prohibited_words_found: ' + found.join(', '));\n}\n\n// Rule Score\nconst rule_score = Math.max(0, 100 - (violations.length * 25));\n\nreturn [{\n  json: {\n    ...item,\n    word_count: wordCount,\n    rule_score,\n    rule_violations: violations,\n    rules_passed: passed,\n    critical_violation: violations.length > 0\n  }\n}];"
+      },
+      "id": "ebc95d52-6b8c-40f4-87cd-f6b4fde6928f",
+      "name": "Rule Checker",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-1408, 80]
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.critical_violation }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "60aa7d1b-4b74-456a-a8f1-9b6eddfabcd2",
+      "name": "Critical Violation?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [-1184, 80]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_GROQ_API_KEY"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\n  \"model\": \"llama-3.1-8b-instant\",\n  \"temperature\": 0.1,\n  \"max_tokens\": 250,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a strict AI content quality reviewer. Return ONLY valid JSON in this format: {\\\"quality_score\\\":90,\\\"reasoning\\\":\\\"Professional and clear\\\",\\\"tone_ok\\\":true,\\\"clarity_ok\\\":true,\\\"brand_aligned\\\":true}\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"={{ $json.content }}\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "69f055b9-399c-4d98-b4f8-0c72d064051d",
+      "name": "LLM Quality Judge",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [-960, 368]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// N6 - Confidence Score Engine\n// Merges Phase 1 rule score + Phase 2 LLM score\n\nconst llmResponse = $input.first().json;\nconst ruleData = $('Rule Checker').first().json;\n\nlet quality_score = 50;\nlet reasoning = 'LLM review completed';\nlet tone_ok = true;\nlet clarity_ok = true;\nlet brand_aligned = true;\nlet parse_error = null;\n\n// Parse Groq response safely\ntry {\n  const raw = llmResponse?.choices?.[0]?.message?.content || '{}';\n  const cleaned = raw\n    .replace(/```json/gi, '')\n    .replace(/```/gi, '')\n    .trim();\n  const parsed = JSON.parse(cleaned);\n  quality_score = Number(parsed.quality_score) || 50;\n  reasoning = String(parsed.reasoning || 'No reasoning provided');\n  tone_ok = parsed.tone_ok !== undefined ? Boolean(parsed.tone_ok) : true;\n  clarity_ok = parsed.clarity_ok !== undefined ? Boolean(parsed.clarity_ok) : true;\n  brand_aligned = parsed.brand_aligned !== undefined ? Boolean(parsed.brand_aligned) : true;\n} catch (error) {\n  parse_error = error.message;\n  quality_score = 50;\n  reasoning = 'Failed to parse LLM response. Default score applied.';\n}\n\n// Phase 1 Score\nconst rule_score = Number(ruleData.rule_score || 0);\n\n// Final Weighted Score: Rule 40% + Quality 60%\nconst final_score = Math.round((rule_score * 0.4) + (quality_score * 0.6));\n\n// Decision Engine\nlet decision = 'AUTO_REJECT';\nif (final_score >= 85) decision = 'AUTO_SEND';\nelse if (final_score >= 60) decision = 'HUMAN_REVIEW';\n\n// Human-friendly status\nconst review_status =\n  decision === 'AUTO_SEND' ? 'APPROVED' :\n  decision === 'HUMAN_REVIEW' ? 'PENDING_REVIEW' : 'REJECTED';\n\nreturn [{\n  json: {\n    review_id: ruleData.review_id,\n    received_at: ruleData.received_at,\n    content: ruleData.content,\n    content_type: ruleData.content_type,\n    rules_profile: ruleData.rules_profile,\n    destination: ruleData.destination,\n    requester_email: ruleData.requester_email,\n    word_count: ruleData.word_count,\n    rule_score,\n    rule_violations: ruleData.rule_violations || [],\n    rules_passed: ruleData.rules_passed || [],\n    quality_score,\n    reasoning,\n    tone_ok,\n    clarity_ok,\n    brand_aligned,\n    final_score,\n    decision,\n    review_status,\n    parse_error\n  }\n}];"
+      },
+      "id": "c167516c-db00-43c6-b9cb-628d2ea59c59",
+      "name": "Confidence Score Engine",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-704, 368]
+    },
+
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.decision }}",
+        "rules": {
+          "rules": [
+            {
+              "value2": "AUTO_SEND"
+            },
+            {
+              "value2": "HUMAN_REVIEW",
+              "output": 1
+            },
+            {
+              "value2": "AUTO_REJECT",
+              "output": 2
+            }
+          ]
+        },
+        "fallbackOutput": 2
+      },
+      "id": "cda1b664-a9ba-4e89-aa5a-aab0585c15fd",
+      "name": "Decision Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [-576, -192]
+    },
+
+    {
+      "parameters": {
+        "sendTo": "={{ $json.destination }}",
+        "subject": "={{ '[Auto-Approved] ' + $json.content_type + ' — Score: ' + $json.final_score + '/100' }}",
+        "emailType": "text",
+        "message": "=Review ID: {{ $json.review_id }}\n\nAI Review Status: {{ $json.review_status }}\n\nFinal Score: {{ $json.final_score }}/100\n\nReasoning:\n{{ $json.reasoning }}\n\n------------------------------------\n\n{{ $json.content }}",
+        "options": {}
+      },
+      "id": "ce8992a7-3092-400e-9982-1fbb913ee4f2",
+      "name": "Gmail Auto Send",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [-256, -208],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_SLACK_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "YOUR_SLACK_CHANNEL_NAME"
+        },
+        "text": "=🔍 *AI Draft Needs Human Review*\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📋 *Content Type:* {{ $json.content_type }}\n\n👤 *Requester:* {{ $json.requester_email }}\n\n🎯 *Final Score:* {{ $json.final_score }}/100\n\n📊 *Rule Score:* {{ $json.rule_score }}/100\n\n🤖 *Quality Score:* {{ $json.quality_score }}/100\n\n⚠️ *Violations:*\n{{ ($json.rule_violations && $json.rule_violations.length > 0) ? $json.rule_violations.join(' | ') : 'None' }}\n\n💡 *AI Feedback:*\n{{ $json.reasoning }}\n\n🔖 *Review ID:*\n{{ $json.review_id }}\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📝 *Draft Content*\n\n{{ $json.content }}\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n✅ *Approve*\n\nYOUR_N8N_WEBHOOK_URL/webhook/approval-action?action=approve&review_id={{ $json.review_id }}\n\n❌ *Reject*\n\nYOUR_N8N_WEBHOOK_URL/webhook/approval-action?action=reject&review_id={{ $json.review_id }}\n\n━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: Waiting for Human Reviewer",
+        "otherOptions": {}
+      },
+      "id": "a78bd2ff-2df0-46bb-93e8-e796bbd1350e",
+      "name": "N8B - Slack Human Review",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [-272, 64],
+      "credentials": {
+        "slackOAuth2Api": {
+          "id": "YOUR_SLACK_CREDENTIAL_ID",
+          "name": "Slack account"
+        }
+      }
+    },
+
+    {
+      "parameters": {
+        "sendTo": "={{ $json.requester_email }}",
+        "subject": "={{ '❌ AI Draft Rejected - ' + ($json.review_id || 'Unknown') }}",
+        "emailType": "text",
+        "message": "=Your AI draft was rejected during automated review.\n\nReview ID:\n{{ $json.review_id }}\n\nContent Type:\n{{ $json.content_type }}\n\nFinal Score:\n{{ $json.final_score || 0 }}/100\n\nDecision:\n{{ $json.decision || 'AUTO_REJECT' }}\n\nVIOLATIONS\n\n{{ $json.rule_violations && $json.rule_violations.length > 0\n? $json.rule_violations.join('\\n')\n: 'Rule validation failed' }}\n\nQUALITY FEEDBACK\n\n{{ $json.reasoning || 'Rejected during rule validation stage' }}\n\nPlease revise and resubmit.\n\nThis is an automated message.",
+        "options": {}
+      },
+      "id": "22fc40f9-2d45-4747-99fe-d9cc0bacac7e",
+      "name": "N8C - Gmail Rejection Notice",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [-272, 288],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "AI_Content_Review_Audit"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Reviews"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Review ID":    "={{ $('Rule Checker').first().json.review_id }}",
+            "Content Type": "={{ $('Rule Checker').first().json.content_type }}",
+            "Rule Score":   "={{ $('Rule Checker').first().json.rule_score }}",
+            "Quality Score":"={{ (() => { try { return $('Confidence Score Engine').first().json.quality_score; } catch(e) { return null; } })() }}",
+            "Final Score":  "={{ (() => { try { return $('Confidence Score Engine').first().json.final_score; } catch(e) { return $('Rule Checker').first().json.rule_score; } })() }}",
+            "Decision":     "={{ (() => { try { return $('Confidence Score Engine').first().json.review_status; } catch(e) { return 'REJECTED'; } })() }}",
+            "Requester":    "={{ $('Rule Checker').first().json.requester_email }}",
+            "Destination":  "={{ $('Rule Checker').first().json.destination }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            { "id": "Review ID",    "displayName": "Review ID",    "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Content Type", "displayName": "Content Type", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Rule Score",   "displayName": "Rule Score",   "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Quality Score","displayName": "Quality Score","required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Final Score",  "displayName": "Final Score",  "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Decision",     "displayName": "Decision",     "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Requester",    "displayName": "Requester",    "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Destination",  "displayName": "Destination",  "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "8ca4a51f-d779-4537-93d0-c5c9c2e47cc9",
+      "name": "Audit Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [256, 64],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GSHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+
+  "connections": {
+    "Webhook Trigger": {
+      "main": [[{ "node": "Prepare Input", "type": "main", "index": 0 }]]
+    },
+    "Prepare Input": {
+      "main": [[{ "node": "Rule Checker", "type": "main", "index": 0 }]]
+    },
+    "Rule Checker": {
+      "main": [[{ "node": "Critical Violation?", "type": "main", "index": 0 }]]
+    },
+    "Critical Violation?": {
+      "main": [
+        [{ "node": "N8C - Gmail Rejection Notice", "type": "main", "index": 0 }],
+        [{ "node": "LLM Quality Judge", "type": "main", "index": 0 }]
+      ]
+    },
+    "LLM Quality Judge": {
+      "main": [[{ "node": "Confidence Score Engine", "type": "main", "index": 0 }]]
+    },
+    "Confidence Score Engine": {
+      "main": [[{ "node": "Decision Router", "type": "main", "index": 0 }]]
+    },
+    "Decision Router": {
+      "main": [
+        [{ "node": "Gmail Auto Send",            "type": "main", "index": 0 }],
+        [{ "node": "N8B - Slack Human Review",   "type": "main", "index": 0 }],
+        [{ "node": "N8C - Gmail Rejection Notice","type": "main", "index": 0 }]
+      ]
+    },
+    "Gmail Auto Send": {
+      "main": [[{ "node": "Audit Log", "type": "main", "index": 0 }]]
+    },
+    "N8B - Slack Human Review": {
+      "main": [[{ "node": "Audit Log", "type": "main", "index": 0 }]]
+    },
+    "N8C - Gmail Rejection Notice": {
+      "main": [[{ "node": "Audit Log", "type": "main", "index": 0 }]]
+    }
+  },
+
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
